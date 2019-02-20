@@ -1,0 +1,109 @@
+import numpy as np
+import cv2
+
+img = cv2.imread('image.png')
+blur = cv2.GaussianBlur(img, (7, 7), 2)
+h, w = img.shape[:2]
+
+"""Morphological gradient"""
+
+kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+gradient = cv2.morphologyEx(blur, cv2.MORPH_GRADIENT, kernel)
+cv2.imshow('Morphological gradient', gradient)
+cv2.waitKey()
+
+Morph gradient
+
+From here, I binarized the gradient using some thresholding. There's probably a cleaner way to do this...but this happens to work better than the dozen other ideas I tried.
+
+"""Binarize gradient"""
+
+lowerb = np.array([0, 0, 0])
+upperb = np.array([15, 15, 15])
+binary = cv2.inRange(gradient, lowerb, upperb)
+cv2.imshow('Binarized gradient', binary)
+cv2.waitKey()
+
+Binarized grad
+
+Now we have a couple issues with this. It needs some cleaning up as it's messy, and further, the ice crystals that are on the edge of the image are showing up---but we don't know where those crystals actually end so we should actually ignore those. To remove those from the mask, I looped through the pixels on the edge and used floodFill() to remove them from the binary image. Don't get confused here on the orders of rows and columns; the if statements are specifying rows and columns of the image matrix, while the input to floodFill() expects points (i.e. x, y form, which is opposite from row, col).
+
+"""Flood fill from the edges to remove edge crystals"""
+
+for row in range(h):
+    if binary[row, 0] == 255:
+        cv2.floodFill(binary, None, (0, row), 0)
+    if binary[row, w-1] == 255:
+        cv2.floodFill(binary, None, (w-1, row), 0)
+
+for col in range(w):
+    if binary[0, col] == 255:
+        cv2.floodFill(binary, None, (col, 0), 0)
+    if binary[h-1, col] == 255:
+        cv2.floodFill(binary, None, (col, h-1), 0)
+
+cv2.imshow('Filled binary gradient', binary)
+cv2.waitKey()
+
+Filled binary grad
+
+Great! Now just to clean this up with some opening and closing...
+
+"""Cleaning up mask"""
+
+foreground = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+foreground = cv2.morphologyEx(foreground, cv2.MORPH_CLOSE, kernel)
+cv2.imshow('Cleanup up crystal foreground mask', foreground)
+cv2.waitKey()
+
+Foreground
+
+So this image was labeled as "foreground" because it has the sure foreground of the objects we want to segment. Now we need to create a sure background of the objects. Now, I did this in the naïve way, which just is to grow your foreground a bunch, so that your objects are probably all defined within that foreground. However, you could probably use the original mask or even the gradient in a different way to get a better definition. Still, this works OK, but is not very robust.
+
+"""Creating background and unknown mask for labeling"""
+
+kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17))
+background = cv2.dilate(foreground, kernel, iterations=3)
+unknown = cv2.subtract(background, foreground)
+cv2.imshow('Background', background)
+cv2.waitKey()
+
+Background
+
+So all the black there is "sure background" for the watershed. Also I created the unknown matrix, which is the area between foreground and background, so that we can pre-label the markers that get passed to watershed as "hey, these pixels are definitely in the foreground, these others are definitely background, and I'm not sure about these ones between." Now all that's left to do is run the watershed! First, you label the foreground image with connected components, identify the unknown and background portions, and pass them in:
+
+"""Watershed"""
+
+markers = cv2.connectedComponents(foreground)[1]
+markers += 1  # Add one to all labels so that background is 1, not 0
+markers[unknown==255] = 0  # mark the region of unknown with zero
+markers = cv2.watershed(img, markers)
+
+You'll notice that I ran watershed() on img. You might experiment running it on a blurred version of the image (maybe median blurring---I tried this and got a little smoother of boundaries for the crystals) or other preprocessed versions of the images which define better boundaries or something.
+
+It takes a little work to visualize the markers as they're all small numbers in a uint8 image. So what I did was assign them some hue in 0 to 179 and set inside a HSV image, then convert to BGR to display the markers:
+
+"""Assign the markers a hue between 0 and 179"""
+
+hue_markers = np.uint8(179*np.float32(markers)/np.max(markers))
+blank_channel = 255*np.ones((h, w), dtype=np.uint8)
+marker_img = cv2.merge([hue_markers, blank_channel, blank_channel])
+marker_img = cv2.cvtColor(marker_img, cv2.COLOR_HSV2BGR)
+cv2.imshow('Colored markers', marker_img)
+cv2.waitKey()
+
+Markers
+
+And finally, overlay the markers onto the original image to check how they look.
+
+"""Label the original image with the watershed markers"""
+
+labeled_img = img.copy()
+labeled_img[markers>1] = marker_img[markers>1]  # 1 is background color
+labeled_img = cv2.addWeighted(img, 0.5, labeled_img, 0.5, 0)
+cv2.imshow('watershed_result.png', labeled_img)
+cv2.waitKey()
+
+Segmentation result
+
+Well, that's the pipeline in it's entirety. You should be able to copy/paste each section in a row and you should be able to get the same results. The weakest parts of this pipeline is binarizing the gradient and defining the sure background for watershed. The distance transform might be useful in binarizing the gradient somehow, but I haven't gotten there yet. Either way...this was a cool problem, I would be interested to see any changes you make to this pipeline or how it fares on other ice-crystal images.
